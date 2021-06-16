@@ -113,6 +113,21 @@ class BertPretrainedModel(PretrainedModel):
             "initializer_range": 0.02,
             "pad_token_id": 0,
         },
+        "bert-base-uncased-prelayernorm": {
+            "vocab_size": 30522,
+            "hidden_size": 768,
+            "num_hidden_layers": 12,
+            "num_attention_heads": 12,
+            "intermediate_size": 3072,
+            "hidden_act": "gelu",
+            "hidden_dropout_prob": 0.1,
+            "attention_probs_dropout_prob": 0.1,
+            "max_position_embeddings": 512,
+            "type_vocab_size": 2,
+            "initializer_range": 0.02,
+            "pad_token_id": 0,
+            "normalize_before":True
+        },
         "bert-large-uncased": {
             "vocab_size": 30522,
             "hidden_size": 1024,
@@ -231,6 +246,8 @@ class BertPretrainedModel(PretrainedModel):
         "model_state": {
             "bert-base-uncased":
             "https://paddlenlp.bj.bcebos.com/models/transformers/bert-base-uncased.pdparams",
+            "bert-base-uncased-prelayernorm":
+            "https://paddlenlp.bj.bcebos.com/models/transformers/bert-base-uncased.pdparams",
             "bert-large-uncased":
             "https://paddlenlp.bj.bcebos.com/models/transformers/bert-large-uncased.pdparams",
             "bert-base-multilingual-uncased":
@@ -285,7 +302,8 @@ class BertModel(BertPretrainedModel):
                  max_position_embeddings=512,
                  type_vocab_size=16,
                  initializer_range=0.02,
-                 pad_token_id=0):
+                 pad_token_id=0,
+                 normalize_before=False):
         super(BertModel, self).__init__()
         self.pad_token_id = pad_token_id
         self.initializer_range = initializer_range
@@ -299,8 +317,15 @@ class BertModel(BertPretrainedModel):
             dropout=hidden_dropout_prob,
             activation=hidden_act,
             attn_dropout=attention_probs_dropout_prob,
-            act_dropout=0)
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_hidden_layers)
+            act_dropout=0,
+            normalize_before=normalize_before)
+        if normalize_before:
+            self.encoder = nn.TransformerEncoder(encoder_layer,
+                                                 num_hidden_layers,
+                                                 norm=LayerNorm(hidden_size))
+            print("Using norm for TranformerEncoder")
+        else:
+            self.encoder = nn.TransformerEncoder(encoder_layer, num_hidden_layers)
         self.pooler = BertPooler(hidden_size)
         self.apply(self.init_weights)
 
@@ -332,17 +357,18 @@ class BertForQuestionAnswering(BertPretrainedModel):
         self.apply(self.init_weights)
 
     def forward(self, input_ids, token_type_ids=None):
-        sequence_output, _ = self.bert(
-            input_ids,
-            token_type_ids=token_type_ids,
-            position_ids=None,
-            attention_mask=None)
+        with paddle.static.amp.fp16_guard():
+            sequence_output, _ = self.bert(
+                input_ids,
+                token_type_ids=token_type_ids,
+                position_ids=None,
+                attention_mask=None)
 
-        logits = self.classifier(sequence_output)
-        logits = paddle.transpose(logits, perm=[2, 0, 1])
-        start_logits, end_logits = paddle.unstack(x=logits, axis=0)
+            logits = self.classifier(sequence_output)
+            logits = paddle.transpose(logits, perm=[2, 0, 1])
+            start_logits, end_logits = paddle.unstack(x=logits, axis=0)
 
-        return start_logits, end_logits
+            return start_logits, end_logits
 
 
 class BertForSequenceClassification(BertPretrainedModel):
@@ -371,15 +397,16 @@ class BertForSequenceClassification(BertPretrainedModel):
                 token_type_ids=None,
                 position_ids=None,
                 attention_mask=None):
-        _, pooled_output = self.bert(
-            input_ids,
-            token_type_ids=token_type_ids,
-            position_ids=position_ids,
-            attention_mask=attention_mask)
+        with paddle.static.amp.fp16_guard():
+            _, pooled_output = self.bert(
+                input_ids,
+                token_type_ids=token_type_ids,
+                position_ids=position_ids,
+                attention_mask=attention_mask)
 
-        pooled_output = self.dropout(pooled_output)
-        logits = self.classifier(pooled_output)
-        return logits
+            pooled_output = self.dropout(pooled_output)
+            logits = self.classifier(pooled_output)
+            return logits
 
 
 class BertForTokenClassification(BertPretrainedModel):
