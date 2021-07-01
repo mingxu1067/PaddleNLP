@@ -249,6 +249,8 @@ class BertTokenizer(PretrainedTokenizer):
     resource_files_names = {"vocab_file": "vocab.txt"}  # for save_pretrained
     pretrained_resource_files_map = {
         "vocab_file": {
+            "bert-base-uncased-prelayernorm":
+            "https://paddle-hapi.bj.bcebos.com/models/bert/bert-base-uncased-vocab.txt",
             "bert-base-uncased":
             "https://paddle-hapi.bj.bcebos.com/models/bert/bert-base-uncased-vocab.txt",
             "bert-large-uncased":
@@ -274,6 +276,9 @@ class BertTokenizer(PretrainedTokenizer):
         }
     }
     pretrained_init_configuration = {
+        "bert-base-uncased-prelayernorm": {
+            "do_lower_case": True
+        },
         "bert-base-uncased": {
             "do_lower_case": True
         },

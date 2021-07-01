@@ -18,21 +18,23 @@ import os
 import random
 import time
 from functools import partial
+import distutils
 
 import numpy as np
 import paddle
-import paddle.distributed.fleet as fleet
+# import paddle.distributed.fleet as fleet
 from paddle.io import DataLoader
 from paddlenlp.datasets import load_dataset
 
 from paddle.metric import Accuracy
 from paddlenlp.data import Stack, Tuple, Pad
 from paddlenlp.data.sampler import SamplerHelper
-from paddlenlp.transformers import BertForSequenceClassification, BertTokenizer
+from paddlenlp.transformers import BertForSequenceClassification, BertTokenizer, BertModel
 from paddlenlp.transformers import ErnieForSequenceClassification, ErnieTokenizer
 from paddlenlp.transformers import LinearDecayWithWarmup
 from paddlenlp.metrics import Mcc, PearsonAndSpearman
 from paddlenlp.utils.log import logger
+from paddle.fluid.io import load_vars
 
 METRIC_CLASSES = {
     "cola": Mcc,
@@ -84,6 +86,13 @@ def parse_args():
         type=str,
         required=True,
         help="The output directory where the model predictions and checkpoints will be written.",
+    )
+    parser.add_argument(
+        "--load_dir",
+        default=None,
+        type=str,
+        required=False,
+        help="The directory where the model predictions and checkpoints will be loaded.",
     )
     parser.add_argument(
         "--max_seq_length",
@@ -146,6 +155,21 @@ def parse_args():
         type=str,
         default="gpu",
         help="Device for selecting for the training.")
+    parser.add_argument(
+        "--use_amp",
+        type=distutils.util.strtobool,
+        default=False,
+        help="Enable mixed precision training.")
+    parser.add_argument(
+        "--use_pure_fp16",
+        type=distutils.util.strtobool,
+        default=False,
+        help="Whether to use pure fp16 training.")
+    parser.add_argument(
+        "--scale_loss",
+        type=float,
+        default=128.0,
+        help="The value of scale_loss for fp16.")
     args = parser.parse_args()
     return args
 
@@ -166,31 +190,45 @@ def create_data_holder(task_name):
     return [input_ids, token_type_ids, label]
 
 
-def reset_program_state_dict(args, model, state_dict, pretrained_state_dict):
-    """
-    Initialize the parameter from the bert config, and set the parameter by 
-    reseting the state dict."
-    """
-    reset_state_dict = {}
+# def reset_program_state_dict(args, model, state_dict, pretrained_state_dict):
+#     """
+#     Initialize the parameter from the bert config, and set the parameter by 
+#     reseting the state dict."
+#     """
+#     reset_state_dict = {}
+#     scale = model.initializer_range if hasattr(model, "initializer_range")\
+#         else getattr(model, args.model_type).config["initializer_range"]
+#     reset_parameter_names = []
+#     for n, p in state_dict.items():
+#         if n in pretrained_state_dict:
+#             reset_state_dict[p.name] = np.array(pretrained_state_dict[n])
+#             reset_parameter_names.append(n)
+#         elif p.name in pretrained_state_dict and "bert" in n:
+#             reset_state_dict[p.name] = np.array(pretrained_state_dict[p.name])
+#             reset_parameter_names.append(n)
+#         else:
+#             dtype_str = "float32"
+#             if str(p.dtype) == "VarType.FP64":
+#                 dtype_str = "float64"
+#             reset_state_dict[p.name] = np.random.normal(
+#                 loc=0.0, scale=scale, size=p.shape).astype(dtype_str)
+#     logger.info("the following parameter had reset, please check. {}".format(
+#         reset_parameter_names))
+#     return reset_state_dict
+
+def reset_program_state_dict(args, model, state_dict):
     scale = model.initializer_range if hasattr(model, "initializer_range")\
-        else getattr(model, args.model_type).config["initializer_range"]
-    reset_parameter_names = []
+        else model.bert.config["initializer_range"]
+
+    new_state_dict = dict()
     for n, p in state_dict.items():
-        if n in pretrained_state_dict:
-            reset_state_dict[p.name] = np.array(pretrained_state_dict[n])
-            reset_parameter_names.append(n)
-        elif p.name in pretrained_state_dict and "bert" in n:
-            reset_state_dict[p.name] = np.array(pretrained_state_dict[p.name])
-            reset_parameter_names.append(n)
-        else:
+        if "layer_norm" not in p.name:
             dtype_str = "float32"
             if str(p.dtype) == "VarType.FP64":
                 dtype_str = "float64"
-            reset_state_dict[p.name] = np.random.normal(
+            new_state_dict[p.name] = np.random.normal(
                 loc=0.0, scale=scale, size=p.shape).astype(dtype_str)
-    logger.info("the following parameter had reset, please check. {}".format(
-        reset_parameter_names))
-    return reset_state_dict
+    return new_state_dict
 
 
 def set_seed(args):
@@ -267,7 +305,7 @@ def do_train(args):
     # Set the paddle execute enviroment
     paddle.enable_static()
     place = paddle.set_device(args.device)
-    fleet.init(is_collective=True)
+    # fleet.init(is_collective=True)
     set_seed(args)
 
     # Create the main_program for the training and dev_program for the validation
@@ -357,8 +395,12 @@ def do_train(args):
     with paddle.static.program_guard(main_program, startup_program):
         num_class = 1 if train_ds.label_list is None else len(
             train_ds.label_list)
-        model, pretrained_state_dict = model_class.from_pretrained(
-            args.model_name_or_path, num_classes=num_class)
+        config = model_class.pretrained_init_configuration[args.model_name_or_path]
+        if config["vocab_size"] % 8 != 0:
+            config["vocab_size"] += 8 - (config["vocab_size"] % 8)
+        model = BertForSequenceClassification(BertModel(**config), num_classes=num_class)
+        # model, pretrained_state_dict = model_class.from_pretrained(
+        #     args.model_name_or_path, num_classes=num_class)
         loss_fct = paddle.nn.loss.CrossEntropyLoss(
         ) if train_ds.label_list else paddle.nn.loss.MSELoss()
         logits = model(input_ids, token_type_ids)
@@ -384,11 +426,23 @@ def do_train(args):
             parameters=model.parameters(),
             weight_decay=args.weight_decay,
             apply_decay_param_fun=lambda x: x in decay_params)
-        optimizer = fleet.distributed_optimizer(optimizer)
+        if args.use_amp:
+            amp_list = paddle.static.amp.AutoMixedPrecisionLists(
+                    custom_white_list=['softmax', 'layer_norm', 'gelu'],
+                    custom_black_list=['lookup_table', 'lookup_table_v2'])
+            optimizer = paddle.static.amp.decorate(
+                optimizer,
+                amp_list,
+                init_loss_scaling=args.scale_loss,
+                use_dynamic_loss_scaling=True,
+                use_pure_fp16=args.use_pure_fp16,)
+        # optimizer = fleet.distributed_optimizer(optimizer)
         optimizer.minimize(loss)
 
     # Create the metric pass for the validation
     with paddle.static.program_guard(dev_program, startup_program):
+        if args.use_amp:
+            logits = paddle.cast(logits, dtype='float32')
         metric = metric_class()
         correct = metric.compute(logits, labels)
 
@@ -398,9 +452,20 @@ def do_train(args):
     exe = paddle.static.Executor(place)
     exe.run(startup_program)
     state_dict = model.state_dict()
-    reset_state_dict = reset_program_state_dict(args, model, state_dict,
-                                                pretrained_state_dict)
+    # reset_state_dict = reset_program_state_dict(args, model, state_dict,
+    #                                             pretrained_state_dict)
+    reset_state_dict = reset_program_state_dict(args, model, state_dict)
     paddle.static.set_program_state(main_program, reset_state_dict)
+
+    if args.load_dir is not None:
+        print("-------------------- Loading model --------------------")
+        print("Load model weights from:", args.load_dir)
+        vars = main_program.global_block().all_parameters()
+        load_vars(exe, args.load_dir, main_program, vars=vars)
+        print("-------------------- Loading model Done ---------------")
+
+    if args.use_amp:
+        optimizer.amp_init(place, test_program=dev_program)
 
     global_step = 0
     tic_train = time.time()
@@ -415,24 +480,24 @@ def do_train(args):
                        args.logging_steps / (time.time() - tic_train)))
                 tic_train = time.time()
             lr_scheduler.step()
-            if global_step % args.save_steps == 0:
-                # Validation pass, record the loss and metric
-                if args.task_name == "mnli":
-                    evaluate(exe, metric, loss, correct, dev_program,
-                             dev_data_loader_matched, "matched eval")
-                    evaluate(exe, metric, loss, correct, dev_program,
-                             dev_data_loader_mismatched, "mismatched eval")
-                else:
-                    evaluate(exe, metric, loss, correct, dev_program,
-                             dev_data_loader)
-                output_dir = os.path.join(args.output_dir,
-                                          "model_%d" % global_step)
-                if not os.path.exists(output_dir):
-                    os.makedirs(output_dir)
-                paddle.static.save_inference_model(
-                    os.path.join(output_dir, "model"),
-                    [input_ids, token_type_ids], [logits], exe)
-                tokenizer.save_pretrained(output_dir)
+            # if global_step % args.save_steps == 0:
+            #     # Validation pass, record the loss and metric
+            #     if args.task_name == "mnli":
+            #         evaluate(exe, metric, loss, correct, dev_program,
+            #                  dev_data_loader_matched, "matched eval")
+            #         evaluate(exe, metric, loss, correct, dev_program,
+            #                  dev_data_loader_mismatched, "mismatched eval")
+            #     else:
+            #         evaluate(exe, metric, loss, correct, dev_program,
+            #                  dev_data_loader)
+            #     output_dir = os.path.join(args.output_dir,
+            #                               "model_%d" % global_step)
+            #     if not os.path.exists(output_dir):
+            #         os.makedirs(output_dir)
+            #     paddle.static.save_inference_model(
+            #         os.path.join(output_dir, "model"),
+            #         [input_ids, token_type_ids], [logits], exe)
+            #     tokenizer.save_pretrained(output_dir)
             if global_step >= num_training_steps:
                 return
 
