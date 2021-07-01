@@ -440,15 +440,16 @@ class BertForQuestionAnswering(BertPretrainedModel):
         self.apply(self.init_weights)
 
     def forward(self, input_ids, token_type_ids=None):
-        sequence_output, _ = self.bert(
-            input_ids,
-            token_type_ids=token_type_ids,
-            position_ids=None,
-            attention_mask=None)
+        with paddle.static.amp.fp16_guard():
+            sequence_output, _ = self.bert(
+                input_ids,
+                token_type_ids=token_type_ids,
+                position_ids=None,
+                attention_mask=None)
 
-        logits = self.classifier(sequence_output)
-        logits = paddle.transpose(logits, perm=[2, 0, 1])
-        start_logits, end_logits = paddle.unstack(x=logits, axis=0)
+            logits = self.classifier(sequence_output)
+            logits = paddle.transpose(logits, perm=[2, 0, 1])
+            start_logits, end_logits = paddle.unstack(x=logits, axis=0)
 
         return start_logits, end_logits
 
@@ -479,14 +480,15 @@ class BertForSequenceClassification(BertPretrainedModel):
                 token_type_ids=None,
                 position_ids=None,
                 attention_mask=None):
-        _, pooled_output = self.bert(
-            input_ids,
-            token_type_ids=token_type_ids,
-            position_ids=position_ids,
-            attention_mask=attention_mask)
+        with paddle.static.amp.fp16_guard():
+            _, pooled_output = self.bert(
+                input_ids,
+                token_type_ids=token_type_ids,
+                position_ids=position_ids,
+                attention_mask=attention_mask)
 
-        pooled_output = self.dropout(pooled_output)
-        logits = self.classifier(pooled_output)
+            pooled_output = self.dropout(pooled_output)
+            logits = self.classifier(pooled_output)
         return logits
 
 
@@ -506,14 +508,15 @@ class BertForTokenClassification(BertPretrainedModel):
                 token_type_ids=None,
                 position_ids=None,
                 attention_mask=None):
-        sequence_output, _ = self.bert(
-            input_ids,
-            token_type_ids=token_type_ids,
-            position_ids=position_ids,
-            attention_mask=attention_mask)
+        with paddle.static.amp.fp16_guard():
+            sequence_output, _ = self.bert(
+                input_ids,
+                token_type_ids=token_type_ids,
+                position_ids=position_ids,
+                attention_mask=attention_mask)
 
-        sequence_output = self.dropout(sequence_output)
-        logits = self.classifier(sequence_output)
+            sequence_output = self.dropout(sequence_output)
+            logits = self.classifier(sequence_output)
         return logits
 
 
