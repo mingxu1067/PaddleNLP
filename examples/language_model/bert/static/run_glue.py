@@ -425,7 +425,8 @@ def do_train(args):
             epsilon=args.adam_epsilon,
             parameters=model.parameters(),
             weight_decay=args.weight_decay,
-            apply_decay_param_fun=lambda x: x in decay_params)
+            apply_decay_param_fun=lambda x: x in decay_params,
+            multi_precision=args.use_pure_fp16)
         if args.use_amp:
             amp_list = paddle.static.amp.AutoMixedPrecisionLists(
                     custom_white_list=['softmax', 'layer_norm', 'gelu'],
@@ -456,6 +457,9 @@ def do_train(args):
     #                                             pretrained_state_dict)
     reset_state_dict = reset_program_state_dict(args, model, state_dict)
     paddle.static.set_program_state(main_program, reset_state_dict)
+
+    # if args.use_amp:
+    #     optimizer.amp_init(place, test_program=dev_program)
 
     if args.load_dir is not None:
         print("-------------------- Loading model --------------------")
